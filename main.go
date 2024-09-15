@@ -1,83 +1,149 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/joho/godotenv"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type Task struct {
-	ID          int    `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	State       bool   `json:"state"`
+	ID          primitive.ObjectID `json:"id,omitempty" bson:"_id,omitempty"`
+	Title       string             `json:"title"`
+	Description string             `json:"description"`
+	State       bool               `json:"state"`
 }
 
+var collection *mongo.Collection
+
 func main() {
-	fmt.Println("Hello World Winners")
-	app := fiber.New()
+	fmt.Println("Hello World!")
 
 	err := godotenv.Load(".env")
 	if err != nil {
-		log.Fatal("Error loading .env file!")
+		log.Fatal("Error loading .env file!", err)
 	}
 
-	PORT := os.Getenv("PORT")
+	MONGODB_URI := os.Getenv("MONGODB_URI")
 
-	tasks := []Task{}
+	clientOptions := options.Client().ApplyURI(MONGODB_URI)
+	client, err := mongo.Connect(context.Background(), clientOptions)
 
-	app.Get("/api/tasks", func(c *fiber.Ctx) error {
-		return c.Status(200).JSON(tasks)
-	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	//Create a new Task
-	app.Post("/api/tasks", func(c *fiber.Ctx) error {
-		task := &Task{} //{id: 0, title:"", Description:"", State:false}
+	defer client.Disconnect(context.Background())
 
-		if err := c.BodyParser(task); err != nil {
+	err = client.Ping(context.Background(), nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("Connected to MONGODB ATLAS")
+
+	collection = client.Database("golang_db").Collection("tasks")
+
+	app := fiber.New()
+
+	app.Get("/api/tasks", getTasks)
+	app.Post("/api/tasks", createTask)
+	app.Patch("/api/tasks/:id", updateTask)
+	app.Delete("/api/tasks/:id", deleteTask)
+
+	port := os.Getenv("PORT")
+
+	if port == "" {
+		port = "5000"
+	}
+
+	log.Fatal(app.Listen("0.0.0.0:" + port))
+
+}
+
+func getTasks(c *fiber.Ctx) error {
+	var tasks []Task
+
+	cursor, err := collection.Find(context.Background(), bson.M{})
+
+	if err != nil {
+		return err
+	}
+
+	defer cursor.Close(context.Background())
+
+	for cursor.Next(context.Background()) {
+		var task Task
+		if err := cursor.Decode(&task); err != nil {
 			return err
 		}
+		tasks = append(tasks, task)
+	}
 
-		if task.Title == "" {
-			return c.Status(400).JSON(fiber.Map{"error": "Task title is required"})
-		}
+	return c.JSON(tasks)
+}
 
-		task.ID = len(tasks) + 1
-		tasks = append(tasks, *task)
+func createTask(c *fiber.Ctx) error {
+	task := new(Task)
 
-		return c.Status(201).JSON(task)
-	})
+	if err := c.BodyParser(task); err != nil {
+		return err
+	}
 
-	//Update a task
-	app.Patch("/api/tasks/:id", func(c *fiber.Ctx) error {
-		id := c.Params("id")
+	if task.Title == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "Todo Title cannot be empty"})
+	}
 
-		for i, task := range tasks {
-			if fmt.Sprint(task.ID) == id {
-				tasks[i].State = true //!tasks[i].State to alternate b/w States T/F
-				return c.Status(200).JSON(tasks[i])
-			}
-		}
+	insertResult, err := collection.InsertOne(context.Background(), task)
+	if err != nil {
+		return err
+	}
 
-		return c.Status(404).JSON(fiber.Map{"error": "Task not found!"})
-	})
+	task.ID = insertResult.InsertedID.(primitive.ObjectID)
 
-	//Delete a task
-	app.Delete("/api/tasks/:id", func(c *fiber.Ctx) error {
-		id := c.Params("id")
+	return c.Status(201).JSON(task)
+}
 
-		for i, task := range tasks {
-			if fmt.Sprint(task.ID) == id {
-				tasks = append(tasks[:i], tasks[i+1:]...)
-				return c.Status(200).JSON(fiber.Map{"success": true})
-			}
-		}
+func updateTask(c *fiber.Ctx) error {
+	id := c.Params("id")
+	objectID, err := primitive.ObjectIDFromHex(id)
 
-		return c.Status(404).JSON(fiber.Map{"error": "Task not found!"})
-	})
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid task ID"})
+	}
 
-	log.Fatal(app.Listen(":" + PORT))
+	filter := bson.M{"_id": objectID}
+	update := bson.M{"$set": bson.M{"state": true}}
+
+	_, err = collection.UpdateOne(context.Background(), filter, update)
+	if err != nil {
+		return err
+	}
+
+	return c.Status(200).JSON(fiber.Map{"Update success": true})
+}
+
+func deleteTask(c *fiber.Ctx) error {
+	id := c.Params("id")
+	objectID, err := primitive.ObjectIDFromHex(id)
+
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid task ID"})
+	}
+
+	filter := bson.M{"_id": objectID}
+	_, err = collection.DeleteOne(context.Background(), filter)
+
+	if err != nil {
+		return err
+	}
+
+	return c.Status(200).JSON(fiber.Map{"Delete success": true})
 }
