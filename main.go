@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -15,9 +17,10 @@ import (
 )
 
 type Task struct {
-	ID          primitive.ObjectID `json:"id,omitempty" bson:"_id,omitempty"`
+	ID          primitive.ObjectID `json:"_id,omitempty" bson:"_id,omitempty"`
 	Title       string             `json:"title"`
 	Description string             `json:"description"`
+	DueDate     string             `json:"dueDate"`
 	State       bool               `json:"state"`
 }
 
@@ -52,6 +55,11 @@ func main() {
 	collection = client.Database("golang_db").Collection("tasks")
 
 	app := fiber.New()
+
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: "http://localhost:5173",
+		AllowHeaders: "Origin,Content-Type,Accept",
+	}))
 
 	app.Get("/api/tasks", getTasks)
 	app.Post("/api/tasks", createTask)
@@ -101,6 +109,9 @@ func createTask(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Todo Title cannot be empty"})
 	}
 
+	task.DueDate = time.Now().Format("02-01-2006")
+	//task.DueDate = time.Now().Format(time.RFC3339)
+
 	insertResult, err := collection.InsertOne(context.Background(), task)
 	if err != nil {
 		return err
@@ -108,26 +119,35 @@ func createTask(c *fiber.Ctx) error {
 
 	task.ID = insertResult.InsertedID.(primitive.ObjectID)
 
+	fmt.Printf("Task DueDate: %v\n", task.DueDate)
+
 	return c.Status(201).JSON(task)
 }
 
 func updateTask(c *fiber.Ctx) error {
 	id := c.Params("id")
 	objectID, err := primitive.ObjectIDFromHex(id)
-
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid task ID"})
 	}
 
-	filter := bson.M{"_id": objectID}
-	update := bson.M{"$set": bson.M{"state": true}}
+	var task Task
+	err = collection.FindOne(context.Background(), bson.M{"_id": objectID}).Decode(&task)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Task not found"})
+	}
 
-	_, err = collection.UpdateOne(context.Background(), filter, update)
+	newState := !task.State
+
+	update := bson.M{
+		"$set": bson.M{"state": newState},
+	}
+	_, err = collection.UpdateOne(context.Background(), bson.M{"_id": objectID}, update)
 	if err != nil {
 		return err
 	}
 
-	return c.Status(200).JSON(fiber.Map{"Update success": true})
+	return c.Status(200).JSON(fiber.Map{"update success": true})
 }
 
 func deleteTask(c *fiber.Ctx) error {
